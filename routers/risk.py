@@ -11,14 +11,6 @@ router = APIRouter()
 # Utilidades comunes
 # =========================
 
-def to_webmercator(lat: float, lon: float):
-    """Convierte lat/lon (grados WGS84) a Web Mercator (EPSG:3857)."""
-    R = 6378137.0
-    x = lon * (math.pi / 180.0) * R
-    y = math.log(math.tan((math.pi / 4.0) + (lat * math.pi / 360.0))) * R
-    return x, y
-
-
 def build_gfi_url(
     wms_url: str,
     layer: str,
@@ -31,6 +23,7 @@ def build_gfi_url(
     feature_count: int = 10,
     vendor_params: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """Genera una URL GetFeatureInfo estándar WMS 1.3.0."""
     base = (
         f"{wms_url}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetFeatureInfo"
         f"&LAYERS={layer}&QUERY_LAYERS={layer}"
@@ -76,9 +69,8 @@ def remove_geometry_from_geojson(obj: Dict[str, Any]) -> Dict[str, Any]:
         return {k: v for k, v in obj.items() if k != "geometry"}
     return obj
 
-
 # =========================
-# Normalizadores / Parsers
+# Parsers
 # =========================
 
 def parse_incendios_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
@@ -86,17 +78,18 @@ def parse_incendios_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
         return {"resumen": "desconocido", "fuente": "MITECO", "raw": obj}
 
     fc = remove_geometry_from_geojson(obj)
-    feats = fc.get("features", []) if isinstance(fc, dict) else []
+    feats = fc.get("features", [])
     if not feats:
         return {"resumen": "sin_datos", "fuente": "MITECO"}
 
     props = feats[0].get("properties", feats[0])
-    municipio = (
-        props.get("municipio") or props.get("MUNICIPIO")
-        or props.get("name") or props.get("NAMEUNIT")
-        or props.get("NOMBRE")
+
+    freq = (
+        props.get("frecuencia")
+        or props.get("N_INCENDIOS")
+        or props.get("Nº Incendios")
+        or props.get("Frecuencia Incendios Forestales")
     )
-    freq = props.get("frecuencia") or props.get("N_INCENDIOS") or props.get("num_incendios")
 
     nivel = None
     try:
@@ -110,65 +103,35 @@ def parse_incendios_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
                 nivel = "medio"
             else:
                 nivel = "alto"
-    except Exception:
+    except:
         pass
 
-    out = {"fuente": "MITECO", "municipio": municipio}
-    if nivel:
-        out["riesgo_incendios"] = nivel
-        out["frecuencia_aprox"] = freq
-    else:
-        out["riesgo_incendios"] = "desconocido"
-    out["props"] = props
-    return out
+    return {
+        "fuente": "MITECO",
+        "riesgo_incendios": nivel or "desconocido",
+        "frecuencia_aprox": freq,
+        "props": props,
+    }
 
 
-# Valor NODATA típico de ráster float32 (IDEe inundaciones fluviales)
-NODATA_FLOAT = -3.4028234663852886e+38
+NODATA = -3.4028234663852886e+38
 
 def inundable_from_gray(fc: Dict[str, Any]) -> str:
-    """
-    Interpreta el GRAY_INDEX de los ráster de inundación:
-    - NODATA_FLOAT (~-3.4e38)  -> nodata
-    - -9999, -32768, etc.      -> nodata
-    - 0                        -> no_inundable
-    - >0                       -> inundable
-    - valores negativos (no NODATA) -> nodata
-    """
+    """Devuelve: inundable | no_inundable | nodata."""
     try:
         feats = fc.get("features", [])
         if not feats:
             return "nodata"
-        props = feats[0].get("properties", feats[0])
-        gray = props.get("GRAY_INDEX", None)
+        gray = feats[0].get("properties", {}).get("GRAY_INDEX")
         if gray is None:
             return "nodata"
-
-        # Intentar convertir a float (por si viene como string)
-        try:
-            v = float(gray)
-        except Exception:
-            return "nodata"
-
-        # Marcadores típicos de NODATA
-        if v in (-9999.0, -9998.0, -32768.0):
-            return "nodata"
-
-        # NODATA float muy negativo (FLOAT32_MIN)
-        if v <= -1e20 or abs(v - NODATA_FLOAT) < 1e10:
-            return "nodata"
-
-        # 0 = no inundable
-        if v == 0.0:
+        g = float(gray)
+        if g == 0:
             return "no_inundable"
-
-        # Valores negativos "raros": mejor tratarlos como nodata
-        if v < 0:
+        if abs(g - NODATA) < 1e-6 or g == -9999:
             return "nodata"
-
-        # Cualquier valor positivo se interpreta como inundable
         return "inundable"
-    except Exception:
+    except:
         return "nodata"
 
 
@@ -178,32 +141,34 @@ def parse_sismico_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
         feats = fc.get("features", [])
         if not feats:
             return {"riesgo_sismico": "sin_riesgo"}
-        props = feats[0].get("properties", feats[0])
+        props = feats[0].get("properties", {})
+
         pga = None
-        for key in ("PGA", "pga", "aceleracion", "ACCEL", "amax"):
+        for key in ("PGA", "pga", "aceleracion", "amax"):
             if key in props:
                 try:
                     pga = float(props[key])
                     break
-                except Exception:
+                except:
                     pass
+
         if pga is None:
             return {"riesgo_sismico": "sin_riesgo"}
+
         if pga < 0.04:
             nivel = "bajo"
         elif pga < 0.08:
             nivel = "medio"
         else:
             nivel = "alto"
+
         return {"pga": pga, "riesgo_sismico": nivel}
-    except Exception:
+
+    except:
         return {"riesgo_sismico": "sin_riesgo"}
 
 
 def parse_desertificacion_summary(obj: Dict[str, Any], tipo: str) -> Dict[str, Any]:
-    if not isinstance(obj, dict) or obj.get("error"):
-        return {"tipo": tipo, "nivel": "nodata", "raw": obj}
-
     raw = obj.get("raw")
     if raw:
         match = re.search(r"(-?\d+(\.\d+)?)", raw)
@@ -218,43 +183,7 @@ def parse_desertificacion_summary(obj: Dict[str, Any], tipo: str) -> Dict[str, A
             else:
                 nivel = "alto"
             return {"tipo": tipo, "valor": valor, "nivel": nivel}
-        else:
-            return {"tipo": tipo, "nivel": "nodata", "raw": raw}
-
     return {"tipo": tipo, "nivel": "nodata", "raw": obj}
-
-
-def parse_dpmt_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Interpretación del deslinde del Dominio Público Marítimo Terrestre (DPMT).
-    Si no hay features -> fuera del DPMT.
-    """
-    if not isinstance(obj, dict) or obj.get("error"):
-        return {"dentro_dpmt": False, "info": None, "raw": obj}
-
-    fc = remove_geometry_from_geojson(obj)
-    feats = fc.get("features", []) if isinstance(fc, dict) else []
-    if not feats:
-        return {"dentro_dpmt": False, "info": None}
-
-    props = feats[0].get("properties", feats[0]) or {}
-
-    provincia = props.get("Provincia") or props.get("PROVINCIA")
-    municipio = props.get("Municipio") or props.get("MUNICIPIO")
-    referencia = props.get("REFERENCIA") or props.get("Referencia") or props.get("ref")
-    dpmt = props.get("DPMT") or props.get("dpm") or props.get("TIPO")
-
-    return {
-        "dentro_dpmt": True,
-        "info": {
-            "provincia": provincia,
-            "municipio": municipio,
-            "referencia": referencia,
-            "dpmt": dpmt,
-            "props": props,
-        },
-    }
-
 
 # =========================
 # Core fetch
@@ -262,114 +191,147 @@ def parse_dpmt_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
 
 async def fetch_all_risks(lat: float, lon: float) -> Dict[str, Any]:
     results: Dict[str, Any] = {}
+
     async with httpx.AsyncClient() as client:
         d_deg = 0.20
+        bbox_c84 = f"{lon - d_deg},{lat - d_deg},{lon + d_deg},{lat + d_deg}"
 
-        # Para CRS:84 (lon,lat,lon,lat)
-        bbox_c84_small = f"{lon - d_deg},{lat - d_deg},{lon + d_deg},{lat + d_deg}"
-
-        # Para EPSG:4326 en WMS 1.3.0 (lat,lon,lat,lon) - lo usaremos para DPMT
-        bbox_epsg4326_small = f"{lat - d_deg},{lon - d_deg},{lat + d_deg},{lon + d_deg}"
-
-        # Incendios
+        # INCENDIOS
         url_inc = build_gfi_url(
             "https://wms.mapama.gob.es/sig/Biodiversidad/Incendios/2006_2015",
-            "NZ.HazardArea", bbox=bbox_c84_small, crs="CRS:84",
-            info_format="application/json", styles="Biodiversidad_Incendios"
+            "NZ.HazardArea",
+            bbox=bbox_c84,
+            crs="CRS:84",
+            info_format="application/json",
+            styles="Biodiversidad_Incendios",
         )
         results["incendios"] = await fetch_any(client, [url_inc])
 
-        # Inundaciones fluviales
+        # INUNDACIONES FLUVIALES
         results["inundacion_fluvial"] = {}
         for periodo in ["T10", "T100", "T500"]:
             url = build_gfi_url(
                 "https://servicios.idee.es/wms-inspire/riesgos-naturales/inundaciones",
-                f"NZ.Flood.Fluvial{periodo}", bbox=bbox_c84_small, crs="CRS:84",
-                info_format="application/json"
+                f"NZ.Flood.Fluvial{periodo}",
+                bbox=bbox_c84,
+                crs="CRS:84",
+                info_format="application/json",
             )
             results["inundacion_fluvial"][periodo] = await fetch_any(client, [url])
 
-        # Inundaciones marinas
+        # INUNDACIONES MARINAS
         results["inundacion_marina"] = {}
         for periodo in ["T100", "T500"]:
             url = build_gfi_url(
                 "https://servicios.idee.es/wms-inspire/riesgos-naturales/inundaciones",
-                f"NZ.Flood.Marina{periodo}", bbox=bbox_c84_small, crs="CRS:84",
-                info_format="application/json"
+                f"NZ.Flood.Marina{periodo}",
+                bbox=bbox_c84,
+                crs="CRS:84",
+                info_format="application/json",
             )
             results["inundacion_marina"][periodo] = await fetch_any(client, [url])
 
-        # Riesgo sísmico
+        # SISMO
         url_sismico = build_gfi_url(
             "https://www.ign.es/wms-inspire/geofisica",
-            "HazardArea2002.NCSE-02", bbox=bbox_c84_small, crs="CRS:84",
-            info_format="application/json"
+            "HazardArea2002.NCSE-02",
+            bbox=bbox_c84,
+            crs="CRS:84",
+            info_format="application/json",
         )
         results["sismico"] = await fetch_any(client, [url_sismico])
 
-        # Desertificación (potencial + laminar)
+        # DESERTIFICACIÓN
         url_des_pot = build_gfi_url(
             "https://wms.mapama.gob.es/sig/Biodiversidad/INESErosionPotencial/wms.aspx",
-            "NZ.HazardArea", bbox=bbox_c84_small, crs="CRS:84",
-            info_format="text/plain"
+            "NZ.HazardArea",
+            bbox=bbox_c84,
+            crs="CRS:84",
+            info_format="text/plain",
         )
         url_des_lam = build_gfi_url(
             "https://wms.mapama.gob.es/sig/Biodiversidad/INESErosionLaminarRaster/wms.aspx",
-            "NZ.HazardArea", bbox=bbox_c84_small, crs="CRS:84",
-            info_format="text/plain"
+            "NZ.HazardArea",
+            bbox=bbox_c84,
+            crs="CRS:84",
+            info_format="text/plain",
         )
         results["desertificacion_potencial"] = await fetch_any(client, [url_des_pot])
         results["desertificacion_laminar"] = await fetch_any(client, [url_des_lam])
 
-        # DPMT - Deslinde
+        # DPMT — Deslinde Costero
         url_dpmt = build_gfi_url(
             "https://wms.mapama.gob.es/sig/Costas/DPMT",
             "AM.CoastalZoneManagementArea",
-            bbox=bbox_c84_small,
-            crs="CRS:84",   # <-- CORREGIDO
-            info_format="application/json"
+            bbox=bbox_c84,
+            crs="CRS:84",  # ← CRÍTICO: NO USAR EPSG:4326
+            info_format="application/json",
         )
         results["dpmt_deslinde"] = await fetch_any(client, [url_dpmt])
 
     return results
 
-
 # =========================
-# Endpoints
+# Endpoint
 # =========================
 
 @router.get("/api/risk_clean")
 async def api_risk_clean(
-    lat: float = Query(..., description="Latitud WGS84"),
-    lon: float = Query(..., description="Longitud WGS84"),
+    lat: float = Query(...),
+    lon: float = Query(...),
 ):
     try:
         raw = await fetch_all_risks(lat, lon)
-        out = {"lat": lat, "lon": lon, "resumen": {}}
 
-        out["resumen"]["incendios"] = parse_incendios_summary(raw.get("incendios", {}))
-        inf = raw.get("inundacion_fluvial", {})
-        im = raw.get("inundacion_marina", {})
-
-        out["resumen"]["inundacion_fluvial"] = {k: inundable_from_gray(v) for k, v in inf.items()}
-        out["resumen"]["inundacion_marina"] = {k: inundable_from_gray(v) for k, v in im.items()}
-        out["resumen"]["sismico"] = parse_sismico_summary(raw.get("sismico", {}))
-        out["resumen"]["desertificacion"] = {
-            "potencial": parse_desertificacion_summary(raw.get("desertificacion_potencial", {}), "potencial"),
-            "laminar": parse_desertificacion_summary(raw.get("desertificacion_laminar", {}), "laminar"),
+        out = {
+            "lat": lat,
+            "lon": lon,
+            "resumen": {},
         }
-        out["resumen"]["dpmt_deslinde"] = parse_dpmt_summary(raw.get("dpmt_deslinde", {}))
 
+        # RESÚMENES
+        out["resumen"]["incendios"] = parse_incendios_summary(raw["incendios"])
+
+        out["resumen"]["inundacion_fluvial"] = {
+            k: inundable_from_gray(v) for k, v in raw["inundacion_fluvial"].items()
+        }
+
+        out["resumen"]["inundacion_marina"] = {
+            k: inundable_from_gray(v) for k, v in raw["inundacion_marina"].items()
+        }
+
+        out["resumen"]["sismico"] = parse_sismico_summary(raw["sismico"])
+
+        out["resumen"]["desertificacion"] = {
+            "potencial": parse_desertificacion_summary(raw["desertificacion_potencial"], "potencial"),
+            "laminar": parse_desertificacion_summary(raw["desertificacion_laminar"], "laminar"),
+        }
+
+        # DPMT — si hay features, estás dentro del DPMT
+        dpmt_fc = raw["dpmt_deslinde"]
+        feats = dpmt_fc.get("features", [])
+        out["resumen"]["dpmt_deslinde"] = {
+            "dentro_dpmt": len(feats) > 0,
+            "info": feats[0].get("properties") if feats else None,
+            "raw": dpmt_fc,
+        }
+
+        # RAW sin geometría
         out["sin_geometria"] = {
-            "incendios": remove_geometry_from_geojson(raw.get("incendios", {})),
-            "inundacion_fluvial": {k: remove_geometry_from_geojson(v) for k, v in inf.items()},
-            "inundacion_marina": {k: remove_geometry_from_geojson(v) for k, v in im.items()},
-            "sismico": remove_geometry_from_geojson(raw.get("sismico", {})),
-            "desertificacion_potencial": raw.get("desertificacion_potencial", {}),
-            "desertificacion_laminar": raw.get("desertificacion_laminar", {}),
-            "dpmt_deslinde": remove_geometry_from_geojson(raw.get("dpmt_deslinde", {})),
+            "incendios": remove_geometry_from_geojson(raw["incendios"]),
+            "inundacion_fluvial": {
+                k: remove_geometry_from_geojson(v) for k, v in raw["inundacion_fluvial"].items()
+            },
+            "inundacion_marina": {
+                k: remove_geometry_from_geojson(v) for k, v in raw["inundacion_marina"].items()
+            },
+            "sismico": remove_geometry_from_geojson(raw["sismico"]),
+            "desertificacion_potencial": raw["desertificacion_potencial"],
+            "desertificacion_laminar": raw["desertificacion_laminar"],
+            "dpmt_deslinde": dpmt_fc,
         }
 
         return out
+
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
