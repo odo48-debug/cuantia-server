@@ -321,14 +321,13 @@ async def fetch_all_risks(lat: float, lon: float) -> Dict[str, Any]:
         results["desertificacion_potencial"] = await fetch_any(client, [url_des_pot])
         results["desertificacion_laminar"] = await fetch_any(client, [url_des_lam])
 
-        # Dominio Público Marítimo Terrestre (Deslinde DPMT)
+        # DPMT - Deslinde
         url_dpmt = build_gfi_url(
             "https://wms.mapama.gob.es/sig/Costas/DPMT",
             "AM.CoastalZoneManagementArea",
-            bbox=bbox_epsg4326_small,      # EPSG:4326 -> lat,lon,lat,lon
-            crs="EPSG:4326",
-            info_format="application/json",
-            styles=""
+            bbox=bbox_c84_small,
+            crs="CRS:84",   # <-- CORREGIDO
+            info_format="application/json"
         )
         results["dpmt_deslinde"] = await fetch_any(client, [url_dpmt])
 
