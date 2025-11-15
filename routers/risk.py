@@ -3,7 +3,6 @@ from fastapi.responses import JSONResponse
 import math
 import httpx
 from typing import Dict, Any, List, Optional
-import re
 
 router = APIRouter()
 
@@ -75,130 +74,6 @@ def remove_geometry_from_geojson(obj: Dict[str, Any]) -> Dict[str, Any]:
     if obj.get("type") == "Feature":
         return {k: v for k, v in obj.items() if k != "geometry"}
     return obj
-
-
-# =========================
-# Normalizadores / Parsers
-# =========================
-
-def parse_incendios_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(obj, dict) or obj.get("error"):
-        return {"resumen": "desconocido", "fuente": "MITECO", "raw": obj}
-
-    fc = remove_geometry_from_geojson(obj)
-    feats = fc.get("features", []) if isinstance(fc, dict) else []
-    if not feats:
-        return {"resumen": "sin_datos", "fuente": "MITECO"}
-
-    props = feats[0].get("properties", feats[0])
-    municipio = (
-        props.get("municipio") or props.get("MUNICIPIO")
-        or props.get("name") or props.get("NAMEUNIT")
-        or props.get("NOMBRE")
-    )
-    freq = props.get("frecuencia") or props.get("N_INCENDIOS") or props.get("num_incendios")
-
-    nivel = None
-    try:
-        if freq is not None:
-            f = float(freq)
-            if f == 0:
-                nivel = "ninguno"
-            elif f < 5:
-                nivel = "bajo"
-            elif f < 20:
-                nivel = "medio"
-            else:
-                nivel = "alto"
-    except Exception:
-        pass
-
-    out = {"fuente": "MITECO", "municipio": municipio}
-    if nivel:
-        out["riesgo_incendios"] = nivel
-        out["frecuencia_aprox"] = freq
-    else:
-        out["riesgo_incendios"] = "desconocido"
-    out["props"] = props
-    return out
-
-
-NODATA = -3.4028234663852886e+38
-
-def inundable_from_gray(fc: Dict[str, Any]) -> str:
-    try:
-        feats = fc.get("features", [])
-        if not feats:
-            return "nodata"
-        gray = feats[0].get("properties", {}).get("GRAY_INDEX", None)
-        if gray is None:
-            return "nodata"
-        if isinstance(gray, (int, float)):
-            if gray == 0:
-                return "no_inundable"
-            if abs(gray - NODATA) < 1e-6:
-                return "nodata"
-            return "inundable"
-        g = float(gray)
-        if g == 0:
-            return "no_inundable"
-        if abs(g - NODATA) < 1e-6:
-            return "nodata"
-        return "inundable"
-    except Exception:
-        return "nodata"
-
-
-def parse_sismico_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        fc = remove_geometry_from_geojson(obj)
-        feats = fc.get("features", [])
-        if not feats:
-            return {"riesgo_sismico": "sin_riesgo"}
-        props = feats[0].get("properties", feats[0])
-        pga = None
-        for key in ("PGA", "pga", "aceleracion", "ACCEL", "amax"):
-            if key in props:
-                try:
-                    pga = float(props[key])
-                    break
-                except Exception:
-                    pass
-        if pga is None:
-            return {"riesgo_sismico": "sin_riesgo"}
-        if pga < 0.04:
-            nivel = "bajo"
-        elif pga < 0.08:
-            nivel = "medio"
-        else:
-            nivel = "alto"
-        return {"pga": pga, "riesgo_sismico": nivel}
-    except Exception:
-        return {"riesgo_sismico": "sin_riesgo"}
-
-
-def parse_desertificacion_summary(obj: Dict[str, Any], tipo: str) -> Dict[str, Any]:
-    if not isinstance(obj, dict) or obj.get("error"):
-        return {"tipo": tipo, "nivel": "nodata", "raw": obj}
-
-    raw = obj.get("raw")
-    if raw:
-        match = re.search(r"(-?\d+(\.\d+)?)", raw)
-        if match:
-            valor = float(match.group(1))
-            if valor <= 0:
-                nivel = "nodata"
-            elif valor < 50:
-                nivel = "bajo"
-            elif valor < 100:
-                nivel = "medio"
-            else:
-                nivel = "alto"
-            return {"tipo": tipo, "valor": valor, "nivel": nivel}
-        else:
-            return {"tipo": tipo, "nivel": "nodata", "raw": raw}
-
-    return {"tipo": tipo, "nivel": "nodata", "raw": obj}
 
 
 # =========================
@@ -275,27 +150,20 @@ async def api_risk_clean(
 ):
     try:
         raw = await fetch_all_risks(lat, lon)
-        out = {"lat": lat, "lon": lon, "resumen": {}}
-
-        out["resumen"]["incendios"] = parse_incendios_summary(raw.get("incendios", {}))
         inf = raw.get("inundacion_fluvial", {})
         im = raw.get("inundacion_marina", {})
 
-        out["resumen"]["inundacion_fluvial"] = {k: inundable_from_gray(v) for k, v in inf.items()}
-        out["resumen"]["inundacion_marina"] = {k: inundable_from_gray(v) for k, v in im.items()}
-        out["resumen"]["sismico"] = parse_sismico_summary(raw.get("sismico", {}))
-        out["resumen"]["desertificacion"] = {
-            "potencial": parse_desertificacion_summary(raw.get("desertificacion_potencial", {}), "potencial"),
-            "laminar": parse_desertificacion_summary(raw.get("desertificacion_laminar", {}), "laminar"),
-        }
-
-        out["sin_geometria"] = {
-            "incendios": remove_geometry_from_geojson(raw.get("incendios", {})),
-            "inundacion_fluvial": {k: remove_geometry_from_geojson(v) for k, v in inf.items()},
-            "inundacion_marina": {k: remove_geometry_from_geojson(v) for k, v in im.items()},
-            "sismico": remove_geometry_from_geojson(raw.get("sismico", {})),
-            "desertificacion_potencial": raw.get("desertificacion_potencial", {}),
-            "desertificacion_laminar": raw.get("desertificacion_laminar", {}),
+        out = {
+            "lat": lat,
+            "lon": lon,
+            "sin_geometria": {
+                "incendios": remove_geometry_from_geojson(raw.get("incendios", {})),
+                "inundacion_fluvial": {k: remove_geometry_from_geojson(v) for k, v in inf.items()},
+                "inundacion_marina": {k: remove_geometry_from_geojson(v) for k, v in im.items()},
+                "sismico": remove_geometry_from_geojson(raw.get("sismico", {})),
+                "desertificacion_potencial": raw.get("desertificacion_potencial", {}),
+                "desertificacion_laminar": raw.get("desertificacion_laminar", {}),
+            }
         }
 
         return out
