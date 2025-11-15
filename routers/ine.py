@@ -5,9 +5,12 @@ router = APIRouter()
 
 TABLAS_MUNICIPALES = {
     "poblacion_municipio": "29005",
+    "viviendas_por_municipio": "3456",
     "indicadores_urbanos": "69303",
+    "indicadores_urbanos_2": "69336",
     "hogares_vivienda": "69302",
-    "superficie_uso_suelo": "69305"
+    "superficie_uso_suelo": "69305",
+    "distribucion_renta": "30904"
 }
 
 FILTRO_EXCLUIR = [
@@ -48,11 +51,11 @@ def filtrar_series(series, excluir=None):
         return series
     return [s for s in series if not any(p.lower() in s.get("Nombre", "").lower() for p in excluir)]
 
-async def get_datos_serie(codigo: str, n_last: int = 5):
+async def get_datos_serie(codigo: str, n_last: int = 3):
     url = f"https://servicios.ine.es/wstempus/jsCache/ES/DATOS_SERIE/{codigo}?nult={n_last}"
     return await get_json_async(url)
 
-async def get_datos_municipio(municipio: str, n_last: int = 5):
+async def get_datos_municipio(municipio: str, n_last: int = 3):
     now = time.time()
     if municipio in cache:
         ts, data = cache[municipio]
@@ -82,7 +85,7 @@ async def get_datos_municipio(municipio: str, n_last: int = 5):
     return resultados
 
 @router.get("/municipio/{municipio}")
-async def consulta_municipio(municipio: str, n_last: int = Query(5)):
+async def consulta_municipio(municipio: str, n_last: int = Query(3)):
     try:
         datos = await get_datos_municipio(municipio, n_last=n_last)
         return {"status": "ok", "municipio": municipio, "datos": datos}
