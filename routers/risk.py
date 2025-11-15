@@ -123,27 +123,50 @@ def parse_incendios_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-NODATA = -3.4028234663852886e+38
+# Valor NODATA típico de ráster float32 (IDEe inundaciones fluviales)
+NODATA_FLOAT = -3.4028234663852886e+38
 
 def inundable_from_gray(fc: Dict[str, Any]) -> str:
+    """
+    Interpreta el GRAY_INDEX de los ráster de inundación:
+    - NODATA_FLOAT (~-3.4e38)  -> nodata
+    - -9999, -32768, etc.      -> nodata
+    - 0                        -> no_inundable
+    - >0                       -> inundable
+    - valores negativos (no NODATA) -> nodata
+    """
     try:
         feats = fc.get("features", [])
         if not feats:
             return "nodata"
-        gray = feats[0].get("properties", {}).get("GRAY_INDEX", None)
+        props = feats[0].get("properties", feats[0])
+        gray = props.get("GRAY_INDEX", None)
         if gray is None:
             return "nodata"
-        if isinstance(gray, (int, float)):
-            if gray == 0:
-                return "no_inundable"
-            if abs(gray - NODATA) < 1e-6:
-                return "nodata"
-            return "inundable"
-        g = float(gray)
-        if g == 0:
-            return "no_inundable"
-        if abs(g - NODATA) < 1e-6:
+
+        # Intentar convertir a float (por si viene como string)
+        try:
+            v = float(gray)
+        except Exception:
             return "nodata"
+
+        # Marcadores típicos de NODATA
+        if v in (-9999.0, -9998.0, -32768.0):
+            return "nodata"
+
+        # NODATA float muy negativo (FLOAT32_MIN)
+        if v <= -1e20 or abs(v - NODATA_FLOAT) < 1e10:
+            return "nodata"
+
+        # 0 = no inundable
+        if v == 0.0:
+            return "no_inundable"
+
+        # Valores negativos "raros": mejor tratarlos como nodata
+        if v < 0:
+            return "nodata"
+
+        # Cualquier valor positivo se interpreta como inundable
         return "inundable"
     except Exception:
         return "nodata"
@@ -201,6 +224,38 @@ def parse_desertificacion_summary(obj: Dict[str, Any], tipo: str) -> Dict[str, A
     return {"tipo": tipo, "nivel": "nodata", "raw": obj}
 
 
+def parse_dpmt_summary(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Interpretación del deslinde del Dominio Público Marítimo Terrestre (DPMT).
+    Si no hay features -> fuera del DPMT.
+    """
+    if not isinstance(obj, dict) or obj.get("error"):
+        return {"dentro_dpmt": False, "info": None, "raw": obj}
+
+    fc = remove_geometry_from_geojson(obj)
+    feats = fc.get("features", []) if isinstance(fc, dict) else []
+    if not feats:
+        return {"dentro_dpmt": False, "info": None}
+
+    props = feats[0].get("properties", feats[0]) or {}
+
+    provincia = props.get("Provincia") or props.get("PROVINCIA")
+    municipio = props.get("Municipio") or props.get("MUNICIPIO")
+    referencia = props.get("REFERENCIA") or props.get("Referencia") or props.get("ref")
+    dpmt = props.get("DPMT") or props.get("dpm") or props.get("TIPO")
+
+    return {
+        "dentro_dpmt": True,
+        "info": {
+            "provincia": provincia,
+            "municipio": municipio,
+            "referencia": referencia,
+            "dpmt": dpmt,
+            "props": props,
+        },
+    }
+
+
 # =========================
 # Core fetch
 # =========================
@@ -209,7 +264,12 @@ async def fetch_all_risks(lat: float, lon: float) -> Dict[str, Any]:
     results: Dict[str, Any] = {}
     async with httpx.AsyncClient() as client:
         d_deg = 0.20
+
+        # Para CRS:84 (lon,lat,lon,lat)
         bbox_c84_small = f"{lon - d_deg},{lat - d_deg},{lon + d_deg},{lat + d_deg}"
+
+        # Para EPSG:4326 en WMS 1.3.0 (lat,lon,lat,lon) - lo usaremos para DPMT
+        bbox_epsg4326_small = f"{lat - d_deg},{lon - d_deg},{lat + d_deg},{lon + d_deg}"
 
         # Incendios
         url_inc = build_gfi_url(
@@ -261,6 +321,17 @@ async def fetch_all_risks(lat: float, lon: float) -> Dict[str, Any]:
         results["desertificacion_potencial"] = await fetch_any(client, [url_des_pot])
         results["desertificacion_laminar"] = await fetch_any(client, [url_des_lam])
 
+        # Dominio Público Marítimo Terrestre (Deslinde DPMT)
+        url_dpmt = build_gfi_url(
+            "https://wms.mapama.gob.es/sig/Costas/DPMT",
+            "AM.CoastalZoneManagementArea",
+            bbox=bbox_epsg4326_small,      # EPSG:4326 -> lat,lon,lat,lon
+            crs="EPSG:4326",
+            info_format="application/json",
+            styles=""
+        )
+        results["dpmt_deslinde"] = await fetch_any(client, [url_dpmt])
+
     return results
 
 
@@ -288,6 +359,7 @@ async def api_risk_clean(
             "potencial": parse_desertificacion_summary(raw.get("desertificacion_potencial", {}), "potencial"),
             "laminar": parse_desertificacion_summary(raw.get("desertificacion_laminar", {}), "laminar"),
         }
+        out["resumen"]["dpmt_deslinde"] = parse_dpmt_summary(raw.get("dpmt_deslinde", {}))
 
         out["sin_geometria"] = {
             "incendios": remove_geometry_from_geojson(raw.get("incendios", {})),
@@ -296,6 +368,7 @@ async def api_risk_clean(
             "sismico": remove_geometry_from_geojson(raw.get("sismico", {})),
             "desertificacion_potencial": raw.get("desertificacion_potencial", {}),
             "desertificacion_laminar": raw.get("desertificacion_laminar", {}),
+            "dpmt_deslinde": remove_geometry_from_geojson(raw.get("dpmt_deslinde", {})),
         }
 
         return out
