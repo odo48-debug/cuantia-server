@@ -4,6 +4,7 @@ import math
 import httpx
 from typing import Dict, Any, List, Optional
 import re
+import xml.etree.ElementTree as ET
 
 router = APIRouter()
 
@@ -68,6 +69,7 @@ def remove_geometry_from_geojson(obj: Dict[str, Any]) -> Dict[str, Any]:
     if obj.get("type") == "Feature":
         return {k: v for k, v in obj.items() if k != "geometry"}
     return obj
+
 
 # =========================
 # Parsers
@@ -185,6 +187,65 @@ def parse_desertificacion_summary(obj: Dict[str, Any], tipo: str) -> Dict[str, A
             return {"tipo": tipo, "valor": valor, "nivel": nivel}
     return {"tipo": tipo, "nivel": "nodata", "raw": obj}
 
+
+# =========================
+# DPMT — NUEVO BLOQUE CORREGIDO
+# =========================
+
+def build_gfi_url_dpmt(lat: float, lon: float) -> str:
+    d = 0.0008
+    lat_min = lat - d
+    lat_max = lat + d
+    lon_min = lon - d
+    lon_max = lon + d
+
+    bbox = f"{lat_min},{lon_min},{lat_max},{lon_max}"
+
+    url = (
+        "https://wms.mapama.gob.es/sig/Costas/DPMT"
+        "?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetFeatureInfo"
+        "&LAYERS=AM.MD_Properties"
+        "&QUERY_LAYERS=AM.MD_Properties"
+        "&CRS=EPSG:4326"
+        f"&BBOX={bbox}"
+        "&WIDTH=256&HEIGHT=256"
+        "&I=128&J=128"
+        "&INFO_FORMAT=application/vnd.ogc.gml"
+        "&FEATURE_COUNT=5"
+    )
+    return url
+
+
+async def fetch_dpmt(lat: float, lon: float):
+    url = build_gfi_url_dpmt(lat, lon)
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, timeout=20.0)
+        r.raise_for_status()
+        raw = r.text
+
+    # Parsear GML → JSON simple
+    try:
+        root = ET.fromstring(raw)
+        ns = {"gml": "http://www.opengis.net/gml"}
+
+        features = []
+        for member in root.findall(".//gml:featureMember", ns):
+            props = {}
+            for child in member.iter():
+                tag = child.tag.split("}")[-1]
+                text = child.text.strip() if child.text else None
+                if tag not in ("featureMember", "geometry", "boundedBy") and text:
+                    props[tag] = text
+            if props:
+                features.append(props)
+
+        return {"features": features, "raw": raw}
+
+    except Exception:
+        return {"error": "No se pudo parsear GML", "raw": raw}
+
+
 # =========================
 # Core fetch
 # =========================
@@ -259,15 +320,8 @@ async def fetch_all_risks(lat: float, lon: float) -> Dict[str, Any]:
         results["desertificacion_potencial"] = await fetch_any(client, [url_des_pot])
         results["desertificacion_laminar"] = await fetch_any(client, [url_des_lam])
 
-        # DPMT — Deslinde Costero
-        url_dpmt = build_gfi_url(
-            "https://wms.mapama.gob.es/sig/Costas/DPMT",
-            "AM.CoastalZoneManagementArea",
-            bbox=bbox_c84,
-            crs="CRS:84",  # ← CRÍTICO: NO USAR EPSG:4326
-            info_format="application/json",
-        )
-        results["dpmt_deslinde"] = await fetch_any(client, [url_dpmt])
+        # DPMT — NUEVO
+        results["dpmt_deslinde"] = await fetch_dpmt(lat, lon)
 
     return results
 
@@ -307,13 +361,13 @@ async def api_risk_clean(
             "laminar": parse_desertificacion_summary(raw["desertificacion_laminar"], "laminar"),
         }
 
-        # DPMT — si hay features, estás dentro del DPMT
-        dpmt_fc = raw["dpmt_deslinde"]
-        feats = dpmt_fc.get("features", [])
+        # DPMT
+        dpmt = raw["dpmt_deslinde"]
+        feats = dpmt.get("features", [])
         out["resumen"]["dpmt_deslinde"] = {
             "dentro_dpmt": len(feats) > 0,
-            "info": feats[0].get("properties") if feats else None,
-            "raw": dpmt_fc,
+            "info": feats[0] if feats else None,
+            "raw": dpmt,
         }
 
         # RAW sin geometría
@@ -328,7 +382,7 @@ async def api_risk_clean(
             "sismico": remove_geometry_from_geojson(raw["sismico"]),
             "desertificacion_potencial": raw["desertificacion_potencial"],
             "desertificacion_laminar": raw["desertificacion_laminar"],
-            "dpmt_deslinde": dpmt_fc,
+            "dpmt_deslinde": dpmt,
         }
 
         return out
