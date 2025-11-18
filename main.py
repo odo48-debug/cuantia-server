@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from routers import pdf2img, ine, risk
+from routers import pdf2img, ine, risk, html2pdf
 
 app = FastAPI(
     title="Cuantia Server",
@@ -7,6 +7,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+
+app.include_router(html2pdf.router, prefix="/convert", tags=["HTML to PDF"])
 app.include_router(pdf2img.router, prefix="/pdf2img", tags=["PDF → Imagen"])
 app.include_router(ine.router, prefix="/ine", tags=["INE Municipios"])
 app.include_router(risk.router, prefix="/risk", tags=["Riesgos Naturales"])
