@@ -12,6 +12,7 @@ TABLAS_MUNICIPALES = {
     "indicadores_urbanos_2": "69336",
     "hogares_vivienda": "69302",
     "superficie_uso_suelo": "69305",
+    "empresas_sector": "4721",
     "distribucion_renta": "30904"
 }
 
