@@ -1,5 +1,5 @@
-from fastapi import APIRouter, UploadFile, File
-from typing import List
+from fastapi import APIRouter
+from pydantic import BaseModel
 import fitz  # PyMuPDF
 import base64
 import tempfile
@@ -7,36 +7,51 @@ import os
 
 router = APIRouter()
 
-@router.post("/convert/")
-async def convert_multiple_pdfs(files: List[UploadFile] = File(...)):
-    """
-    Convierte múltiples PDFs a imágenes (una por página) y devuelve base64.
-    """
-    all_images = []
+class PdfPayload(BaseModel):
+    pdf_base64: str
+    dpi: int = 150
 
-    for file in files:
-        if not file.filename.lower().endswith(".pdf"):
-            continue
-
+@router.post("/convert")
+async def convert_pdf_to_images(payload: PdfPayload):
+    """
+    Convierte un PDF (base64) a una lista de imágenes en base64 limpio.
+    Ideal para que Deno las suba a Base44.
+    """
+    try:
+        # 1. Crear archivo temporal con el PDF
+        pdf_bytes = base64.b64decode(payload.pdf_base64)
         temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        temp_pdf.write(await file.read())
+        temp_pdf.write(pdf_bytes)
         temp_pdf.close()
 
+        # 2. Abrir PDF
         pdf_doc = fitz.open(temp_pdf.name)
+        images_base64 = []
 
+        # 3. Convertir cada página a JPG base64
         for page_number in range(len(pdf_doc)):
             page = pdf_doc.load_page(page_number)
-            pix = page.get_pixmap(dpi=150)
+
+            # Renderizamos con la escala correcta según DPI
+            zoom = payload.dpi / 72
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat)
+
             image_bytes = pix.tobytes("jpg")
             image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-            all_images.append({
-                "source_pdf": file.filename,
-                "page": page_number + 1,
-                "image_base64": image_b64
-            })
+            images_base64.append(image_b64)
 
+        # 4. Limpiar
         pdf_doc.close()
         os.remove(temp_pdf.name)
 
-    return {"images": all_images}
+        return {
+            "success": True,
+            "page_count": len(images_base64),
+            "images_base64": images_base64
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
