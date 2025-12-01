@@ -6,9 +6,27 @@ from typing import Dict, Any, List, Optional
 
 router = APIRouter()
 
-# --- Constantes del Servicio DPMT ---
+# --- Constantes del Servicio WMS ---
 DPMT_WMS_URL = "https://wms.mapama.gob.es/sig/Costas/DPMT"
 DPMT_LAYER_NAME = "AM.CoastalZoneManagementArea"
+
+
+# --- CONFIGURACIÓN DE PONDERACIÓN Y MAPEO DE RIESGOS ---
+RISK_WEIGHTS = {
+    # Peso económico/estructural asignado a cada tipo de riesgo
+    "R1_inundacion": 0.40,  # Alta prioridad
+    "R2_dpmt_costas": 0.30, # Media/Alta (limitaciones de uso)
+    "R3_incendios": 0.20,   # Media
+    "R4_sismico": 0.10      # Baja/Media (depende de la zona)
+}
+
+# Mapeo de Periodo de Retorno a Puntuación (Score) para Inundaciones
+FLOOD_SCORE_MAP = {
+    "T10": 10,  # Riesgo Alto (Periodo 10 años)
+    "T100": 7,  # Riesgo Medio (Periodo 100 años)
+    "T500": 5   # Riesgo Bajo (Periodo 500 años)
+}
+# -----------------------------------------------------------------
 
 
 # =========================
@@ -16,7 +34,7 @@ DPMT_LAYER_NAME = "AM.CoastalZoneManagementArea"
 # =========================
 
 def to_webmercator(lat: float, lon: float):
-    """Convierte lat/lon (grados WGS84) a Web Mercator (EPSG:3857)."""
+    """Convierte lat/lon (grados WGS84) a Web Mercator (EPSPS:3857)."""
     R = 6378137.0
     x = lon * (math.pi / 180.0) * R
     y = math.log(math.tan((math.pi / 4.0) + (lat * math.pi / 360.0))) * R
@@ -28,9 +46,7 @@ def build_gfi_url(
     layer: str,
     bbox: str,
     crs: str,
-    # Los valores por defecto se ajustan para consulta puntual (1x1)
-    # y ya no se usa 256x256 por defecto.
-    width: int = 1, 
+    width: int = 1,  
     height: int = 1,
     info_format: str = "application/json",
     styles: Optional[str] = None,
@@ -43,7 +59,7 @@ def build_gfi_url(
         f"&LAYERS={layer}&QUERY_LAYERS={layer}"
         f"&CRS={crs}&BBOX={bbox}"
         f"&WIDTH={width}&HEIGHT={height}"
-        f"&I=0&J=0" 
+        f"&I=0&J=0"  
         f"&INFO_FORMAT={info_format}"
         f"&FEATURE_COUNT={feature_count}"
     )
@@ -64,8 +80,8 @@ async def fetch_any(client: httpx.AsyncClient, urls: List[str]) -> Dict[str, Any
             try:
                 return r.json()
             except Exception:
-                # Si no es JSON, devolvemos el texto crudo (útil para servicios 'text/plain')
-                return {"raw": r.text} 
+                # Si no es JSON, devolvemos el texto crudo 
+                return {"raw": r.text}  
         except Exception as e:
             last_err = str(e)
     return {"error": last_err or "unknown error"}
@@ -85,6 +101,64 @@ def remove_geometry_from_geojson(obj: Dict[str, Any]) -> Dict[str, Any]:
         return {k: v for k, v in obj.items() if k != "geometry"}
     return obj
 
+
+# =========================
+# LÓGICA DE CÁLCULO DE RIESGO
+# =========================
+
+def calculate_risk_level(raw_risks: Dict[str, Any]) -> int:
+    """
+    Convierte el resultado crudo de WMS a una Puntuación Compuesta (0-10)
+    y la mapea al Nivel de Riesgo (1=Bajo, 2=Medio, 3=Alto) para K_CM.
+    """
+    composite_score = 0.0
+
+    # A. RIESGO DE INUNDACIÓN (R1: Fluvial + Marina) - Peso 0.40
+    # Se toma el score más alto de cualquier tipo de inundación
+    max_flood_score = 0
+    
+    # 1. Inundación Fluvial y Marina
+    flood_data = {**raw_risks.get("inundacion_fluvial", {}), **raw_risks.get("inundacion_marina", {})}
+    
+    for periodo, data in flood_data.items():
+        if isinstance(data, dict) and data.get("features"):
+            score = FLOOD_SCORE_MAP.get(periodo, 0)
+            max_flood_score = max(max_flood_score, score)
+    
+    composite_score += max_flood_score * RISK_WEIGHTS["R1_inundacion"]
+
+
+    # B. DOMINIO PÚBLICO MARÍTIMO TERRESTRE (R2) - Peso 0.30
+    # Si hay features (está dentro del DPMT o su servidumbre), es un riesgo de alto impacto legal/económico
+    dpmt_data = raw_risks.get("dominio_publico_maritimo_terrestre", {})
+    score_dpmt = 10 if isinstance(dpmt_data, dict) and dpmt_data.get("features") else 0
+    composite_score += score_dpmt * RISK_WEIGHTS["R2_dpmt_costas"]
+
+
+    # C. INCENDIOS (R3) - Peso 0.20
+    incendios_data = raw_risks.get("incendios", {})
+    # Si hay una feature de riesgo, puntuamos alto (8)
+    score_incendio = 8 if isinstance(incendios_data, dict) and incendios_data.get("features") else 0
+    composite_score += score_incendio * RISK_WEIGHTS["R3_incendios"]
+
+
+    # D. RIESGO SÍSMICO (R4) - Peso 0.10
+    sismico_data = raw_risks.get("sismico", {})
+    # Si hay una feature (zona de riesgo), puntuamos medio (5)
+    score_sismico = 5 if isinstance(sismico_data, dict) and sismico_data.get("features") else 0
+    composite_score += score_sismico * RISK_WEIGHTS["R4_sismico"]
+
+    
+    # --- MAPEO FINAL DEL SCORE COMPUESTO AL NIVEL (1, 2, 3) ---
+    # Escala basada en un máximo teórico de 10.0
+    if composite_score <= 3.0:
+        return 1  # Bajo (Usar K_CM con valor 1)
+    elif composite_score <= 6.0:
+        return 2  # Medio (Usar K_CM con valor 2)
+    else: 
+        return 3  # Alto (Usar K_CM con valor 3)
+
+
 # =========================
 # Core fetch
 # =========================
@@ -93,15 +167,11 @@ async def fetch_all_risks(lat: float, lon: float) -> Dict[str, Any]:
     results: Dict[str, Any] = {}
     async with httpx.AsyncClient() as client:
         
-        # --- DEFINICIÓN AJUSTADA PARA MÁXIMA EXACTITUD (APROX. 10m x 10m) ---
-        # 0.00006 grados es un margen de aprox. 6 metros, creando una BBOX de ~12m x 14m.
-        d_deg_inmueble = 0.00006 
+        # Definición de la BBOX para consulta puntual
+        d_deg_inmueble = 0.00006  
         bbox_inmueble = f"{lon - d_deg_inmueble},{lat - d_deg_inmueble},{lon + d_deg_inmueble},{lat + d_deg_inmueble}"
+        point_query_params = {"width": 1, "height": 1}  
         
-        # Parámetros para consulta puntual (width=1, height=1)
-        point_query_params = {"width": 1, "height": 1} 
-        # -----------------------------------------------------------------
-
 
         # === RIESGO 1: Dominio Público Marítimo Terrestre (DPMT) ===
         url_dpmt = build_gfi_url(
@@ -162,6 +232,7 @@ async def fetch_all_risks(lat: float, lon: float) -> Dict[str, Any]:
 
 
         # === RIESGO 6: Desertificación (Potencial y Laminar) ===
+        # Nota: Estos se fetchan, pero no se ponderan directamente en el score final (W=0)
         url_des_pot = build_gfi_url(
             "https://wms.mapama.gob.es/sig/Biodiversidad/INESErosionPotencial/wms.aspx",
             "NZ.HazardArea", 
@@ -193,21 +264,28 @@ async def api_risk_clean(
 ):
     try:
         raw = await fetch_all_risks(lat, lon)
+        
+        # 💡 CALCULO E INCLUSIÓN DEL NIVEL DE RIESGO PARA HOMOGENEIZACIÓN
+        risk_level = calculate_risk_level(raw) 
+
         inf = raw.get("inundacion_fluvial", {})
         im = raw.get("inundacion_marina", {})
 
         out = {
             "lat": lat,
             "lon": lon,
+            "risk_analysis": {
+                "final_risk_level": risk_level, # <-- Valor 1, 2 o 3 para K_CM
+                "note": "Riesgo calculado por Score Ponderado (Inundación 40%, DPMT 30%, Incendios 20%, Sismico 10%)."
+            },
             "sin_geometria": {
-                # Se añade la clave para el nuevo riesgo
                 "dominio_publico_maritimo_terrestre": remove_geometry_from_geojson(raw.get("dominio_publico_maritimo_terrestre", {})),
-                
                 "incendios": remove_geometry_from_geojson(raw.get("incendios", {})),
                 "inundacion_fluvial": {k: remove_geometry_from_geojson(v) for k, v in inf.items()},
                 "inundacion_marina": {k: remove_geometry_from_geojson(v) for k, v in im.items()},
                 "sismico": remove_geometry_from_geojson(raw.get("sismico", {})),
                 
+                # Desertificación se deja en crudo ya que es de menor impacto directo
                 "desertificacion_potencial": raw.get("desertificacion_potencial", {}),
                 "desertificacion_laminar": raw.get("desertificacion_laminar", {}),
             }
