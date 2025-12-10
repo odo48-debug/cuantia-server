@@ -73,6 +73,30 @@ def filtrar_series(series, excluir=None):
         return series
     return [s for s in series if not any(p.lower() in s.get("Nombre", "").lower() for p in excluir)]
 
+def simplificar_datos_serie(datos_serie):
+    """
+    Simplifica los datos de una serie eliminando campos innecesarios.
+    Solo mantiene los valores por año.
+    """
+    if not datos_serie or isinstance(datos_serie, dict) and "error" in datos_serie:
+        return datos_serie
+        
+    # Extraer solo los datos relevantes
+    resultado = {}
+    
+    # Mantener solo los valores por año
+    if "Data" in datos_serie:
+        valores_por_año = {}
+        for dato in datos_serie.get("Data", []):
+            año = dato.get("Anyo")
+            valor = dato.get("Valor")
+            if año is not None and valor is not None:
+                valores_por_año[año] = valor
+        
+        resultado = valores_por_año
+        
+    return resultado
+
 # --- FUNCIONES PRINCIPALES DE CONSULTA ---
 
 async def get_json_async(url: str, timeout: int = 15):
@@ -130,7 +154,7 @@ async def get_datos_municipio(municipio: str, n_last: int = 3):
                 
             try:
                 datos = await get_datos_serie(cod, n_last=n_last)
-                datos_tabla[nombre] = datos
+                datos_tabla[nombre] = simplificar_datos_serie(datos)
             except Exception as e:
                 datos_tabla[nombre] = {"error": f"Error al obtener datos: {str(e)}"}
                 
