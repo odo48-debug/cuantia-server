@@ -7,7 +7,6 @@ router = APIRouter()
 
 TABLAS_MUNICIPALES = {
     "poblacion_municipio": "29005",
-    "viviendas_por_municipio": "3456",
     "indicadores_urbanos": "69303",
     "indicadores_urbanos_2": "69336",
     "hogares_vivienda": "69302",
