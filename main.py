@@ -24,6 +24,7 @@ app.include_router(html2pdf.router, prefix="/convert", tags=["HTML to PDF"])
 app.include_router(pdf2img.router, prefix="/pdf2img", tags=["PDF → Imagen"])
 app.include_router(ine.router, prefix="/ine", tags=["INE Municipios"])
 app.include_router(risk.router, prefix="/risk", tags=["Riesgos Naturales"])
+app.include_router(ade.router, prefix="/ade", tags=["IA Document Extraction"])
 
 
 # 🏠 Ruta raíz informativa
@@ -35,6 +36,7 @@ def root():
             "pdf2img": "/pdf2img/convert",
             "ine": "/ine/municipio/{municipio}",
             "risk": "/risk/api/risk_clean",
-            "html2pdf": "/convert/html-to-pdf"
+            "html2pdf": "/convert/html-to-pdf",
+            "ade_extraction": "/ade/extract"
         }
     }
