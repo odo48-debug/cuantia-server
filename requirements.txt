@@ -4,3 +4,5 @@ httpx
 PyMuPDF
 python-multipart
 weasyprint
+pydantic
+landingai-ade
