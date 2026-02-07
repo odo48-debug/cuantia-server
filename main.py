@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from routers import pdf2img, ine, risk, html2pdf
+from routers import pdf2img, ine, risk, html2pdf, ade
 
 app = FastAPI(
     title="Cuantia Server",
