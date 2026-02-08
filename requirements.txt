@@ -6,3 +6,4 @@ python-multipart
 weasyprint
 pydantic
 landingai-ade
+Pillow
